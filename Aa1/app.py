@@ -1,16 +1,17 @@
 from flask import Flask, render_template, request, send_file
 import cv2
-import pytesseract
+import easyocr
 import re
 import os
 import zipfile
+import numpy as np
 from werkzeug.utils import secure_filename
 from io import BytesIO
 
 app = Flask(__name__)
 
-# ✅ IMPORTANT: Render/Linux fix
-pytesseract.pytesseract.tesseract_cmd = "tesseract"
+# EasyOCR Reader
+reader = easyocr.Reader(['en'])
 
 UPLOAD = "uploads"
 OUTPUT = "outputs"
@@ -20,8 +21,7 @@ os.makedirs(OUTPUT, exist_ok=True)
 # -----------------------------
 # NAME LIST
 # -----------------------------
-NAMES_LIST = [ 
-    "Pranathi Gundagani","Shashank Reddy Gantla","Sai Ravi Teja","SAI Lokesh Kalemula",
+NAMES_LIST = ["Pranathi Gundagani","Shashank Reddy Gantla","Sai Ravi Teja","SAI Lokesh Kalemula",
 "Vaishnavi Suda","sai charan merugu","Pruthvi Teja","Ganesh Reddy","Sruthi Agarwal",
 "Sai Kiran","Anvesh Reddy","Hanuk Potharaju","Sharik Shaik","Grishma Avula",
 "Sanjana","Sai Teja Emmadishetty","Sreeja Anantha","Adharsh Malla","Sravan Kumar",
@@ -61,14 +61,12 @@ NAMES_LIST = [
 "Preethu Prathyusha","Sravanthi","Azmaan Amin Hemraj",
 "Alekha mandalapu","Aravind Reddy","sree kalyan Reddy",
 "Uma Tamalapudi","Gnana Deepika","Bhavana pabboju",
-"Avinash nadella","Nikhil kumar","Vamshi chaganti"
-]
+"Avinash nadella","Nikhil kumar","Vamshi chaganti"]  # (shortened, you can paste your full list)
 
 # -----------------------------
 # REGEX
 # -----------------------------
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-US_PHONE_RE = re.compile(r"(\+1\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
 IND_PHONE_RE = re.compile(r"(\+91[\-\s]?)?[6-9]\d{9}")
 URL_RE = re.compile(r"(https?://[^\s]+|www\.[^\s]+)")
 ALLOWED_EXTENSIONS = {'png','jpg','jpeg','bmp'}
@@ -82,120 +80,100 @@ def strong_blur(img,x,y,w,h):
     x=max(0,x); y=max(0,y)
     w=min(img.shape[1]-x,w)
     h=min(img.shape[0]-y,h)
+    roi=img[y:y+h,x:x+w]
+    blurred=cv2.GaussianBlur(roi,(99,99),40)
+    img[y:y+h,x:x+w]=blurred
 
-    roi = img[y:y+h, x:x+w]
-    if roi.size == 0:
-        return
-
-    img[y:y+h, x:x+w] = cv2.GaussianBlur(roi, (51,51), 30)
-
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
+face_cascade=cv2.CascadeClassifier(cv2.data.haarcascades+"haarcascade_frontalface_default.xml")
 
 def blur_faces(img):
-    try:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-        for (x,y,w,h) in faces:
-            strong_blur(img,x,y,w,h)
-    except:
-        pass
+    gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+    faces=face_cascade.detectMultiScale(gray,1.3,5)
+    for(x,y,w,h) in faces:
+        strong_blur(img,x,y,w,h)
     return img
-
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
-@app.route("/upload", methods=["POST"])
+@app.route("/upload",methods=["POST"])
 def upload():
-    try:
-        if "images" not in request.files:
-            return "No files uploaded", 400
+    if 'images' not in request.files:
+        return "Upload failed: No files",400
 
-        files = request.files.getlist("images")
+    files=request.files.getlist("images")
+    memory_file=BytesIO()
+    processed=0
 
-        memory_file = BytesIO()
-        processed = 0
+    with zipfile.ZipFile(memory_file,'w',zipfile.ZIP_DEFLATED) as zf:
+        for file in files:
+            if file.filename=='' or not allowed_file(file.filename):
+                continue
 
-        with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
+            filename=secure_filename(file.filename)
+            path=os.path.join(UPLOAD,filename)
+            file.save(path)
 
-            for file in files:
-                if file.filename == "" or not allowed_file(file.filename):
+            img=cv2.imread(path)
+            if img is None:
+                continue
+
+            # Resize for better OCR
+            img=cv2.resize(img,None,fx=2,fy=2)
+
+            # EasyOCR detection
+            results = reader.readtext(img)
+
+            for (bbox, text, prob) in results:
+                text_clean = text.strip()
+
+                (tl, tr, br, bl) = bbox
+                x = int(tl[0])
+                y = int(tl[1])
+                w = int(tr[0] - tl[0])
+                h = int(bl[1] - tl[1])
+
+                # EMAIL
+                if EMAIL_RE.search(text_clean):
+                    strong_blur(img,x,y,w,h)
                     continue
 
-                filename = secure_filename(file.filename)
-                path = os.path.join(UPLOAD, filename)
-                file.save(path)
-
-                img = cv2.imread(path)
-                if img is None:
+                # PHONE / URL
+                if IND_PHONE_RE.search(text_clean) or URL_RE.search(text_clean):
+                    strong_blur(img,x,y,w,h)
                     continue
 
-                img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                # NAME CHECK
+                lower_text=text_clean.lower()
+                for name in NAMES_LIST:
+                    if name.lower() in lower_text:
+                        strong_blur(img,x,y,w,h)
+                        break
 
-                data = pytesseract.image_to_data(
-                    gray,
-                    output_type=pytesseract.Output.DICT,
-                    config="--psm 6"
-                )
+            # Face blur
+            img=blur_faces(img)
 
-                for i, word in enumerate(data["text"]):
-                    text = word.strip()
-                    if not text:
-                        continue
+            # Resize back
+            img=cv2.resize(img,None,fx=0.5,fy=0.5)
 
-                    x = data["left"][i]
-                    y = data["top"][i]
-                    w = data["width"][i]
-                    h = data["height"][i]
+            out_path=os.path.join(OUTPUT,"blurred_"+filename)
+            cv2.imwrite(out_path,img)
 
-                    if EMAIL_RE.search(text) or US_PHONE_RE.search(text) or IND_PHONE_RE.search(text):
-                        strong_blur(img, x, y, w, h)
-                        continue
+            zf.write(out_path,os.path.basename(out_path))
+            processed+=1
 
-                    if URL_RE.search(text):
-                        strong_blur(img, x, y, w, h)
-                        continue
+            os.remove(path)
+            os.remove(out_path)
 
-                    lower_text = text.lower()
-                    for full_name in NAMES_LIST:
-                        name_parts = full_name.lower().split()
-                        if any(part in lower_text for part in name_parts):
-                            strong_blur(img, x, y, w, h)
-                            break
+    memory_file.seek(0)
 
-                img = blur_faces(img)
-                img = cv2.resize(img, None, fx=0.5, fy=0.5)
+    if processed==0:
+        return "No valid images processed",400
 
-                out_path = os.path.join(OUTPUT, "blur_" + filename)
-                cv2.imwrite(out_path, img)
+    return send_file(memory_file,mimetype='application/zip',
+                     as_attachment=True,
+                     download_name='blurred_images.zip')
 
-                zf.write(out_path, filename)
-
-                os.remove(path)
-                os.remove(out_path)
-
-                processed += 1
-
-        memory_file.seek(0)
-
-        if processed == 0:
-            return "No valid images processed", 400
-
-        return send_file(
-            memory_file,
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name="blurred_images.zip"
-        )
-
-    except Exception as e:
-        return f"Error processing images: {str(e)}", 500
-
-
-if __name__ == "__main__":
-    app.run()
+if __name__=="__main__":
+    app.run(debug=True)
