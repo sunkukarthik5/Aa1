@@ -3,4 +3,5 @@ opencv-python==4.8.1.78
 pytesseract==0.3.13
 Werkzeug==2.3.7
 numpy<2
-gunicorn==21.2.0
+gunicorn
+Pillow
