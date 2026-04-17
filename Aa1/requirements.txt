@@ -1,6 +1,6 @@
 Flask==2.3.3
 opencv-python==4.8.1.78
-pytesseract==0.3.10
+pytesseract==0.3.13
 Werkzeug==2.3.7
 numpy<2
-gunicorn
+gunicorn==21.2.0
